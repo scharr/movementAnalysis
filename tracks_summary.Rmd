@@ -479,59 +479,6 @@ write_csv(
   tracks_onset_timings, 
   "/Volumes/GoogleDrive/My Drive/AlexTony/Projects/movementAnalysis/data/tracks_summary_onset.csv"
   )
-
-## Code used to figure out how to get timing at a given displacement
-# test <-
-#   tracks_onset_interpolated %>%
-#   filter(
-#     base_filename == tracks_timing$base_filename[[1]] | base_filename == tracks_timing$base_filename[[200]]  | base_filename == tracks_timing$base_filename[[400]] ,
-#     episode == tracks_timing$episode[[1]] |  episode == tracks_timing$episode[[200]] |  episode == tracks_timing$episode[[400]],
-#     track_id == tracks_timing$track_id[[1]] | track_id == tracks_timing$track_id[[200]] | track_id == tracks_timing$track_id[[400]]
-#   ) %>%
-#   group_by(base_filename, episode, track_id) %>%
-#   filter(position_nm_y_zeroed <= 50) %>%
-#   arrange(time)
-# 
-# test %>%
-#   ggplot(aes(x = time, y = position_nm_y_zeroed, group = interaction(base_filename, episode, track_id))) +
-#   geom_point()
-# 
-# test %>%
-#   top_n(1, time) %>%
-#     ggplot(aes(x = time, y = position_nm_y_zeroed, group = interaction(base_filename, episode, track_id))) +
-#   geom_point()
-
-## Code used to figure out how to do interpolation and add to data frame
-# test <-
-#   tracks_timing %>% 
-#   filter(
-#     base_filename == tracks_timing$base_filename[[1]] | base_filename == tracks_timing$base_filename[[200]] ,
-#     episode == tracks_timing$episode[[1]] |  episode == tracks_timing$episode[[200]],
-#     track_id == tracks_timing$track_id[[1]] | track_id == tracks_timing$track_id[[200]]
-#   )
-# 
-# test_interp <- approx(test$time, test$position_nm_y_zeroed, xout = seq(min(test$time), max(test$time), 0.001))
-# 
-# test %>%
-#   ggplot(aes(x = time, y = position_nm_y_zeroed, color = track_id)) +
-#   geom_point()
-# 
-# test_interp %>%
-#   as.data.frame() %>% nrow()
-#   ggplot(aes(x = x, y = y)) +
-#   geom_point()
-#   
-# test %>%
-#   group_by(base_filename, episode, track_id) %>%
-#   summarise(
-#     interpolated = 
-#       approx(time, position_nm_y_zeroed, xout = seq(min(time), max(time), 0.001)) %>% 
-#       as.data.frame() %>% 
-#       list()
-#     ) %>%
-#   unnest() %>%
-#   ggplot(aes(x = x, y = y, group = interaction(base_filename, episode, track_id), color = as.factor(track_id))) +
-#   geom_point()
 ```
 
 ## Combine tracks summaries & calculate mag reverse, percent reverse etc
