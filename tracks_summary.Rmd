@@ -1,0 +1,1148 @@
+---
+title: "tracks summary"
+output:
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: hide
+    df_print: paged
+---
+
+## loading tracks, tracks_index, and index (cell information)
+```{r, warning=FALSE, cache=TRUE}
+library(tidyverse)
+library(plotly) 
+# plotly is only needed if looking at the interactive plots of the exponential 
+# fit results, otherwise it can be commented out
+
+# tracks path
+all_tracks_path <- "../../data/tracks/all_tracks.rds"
+
+all_tracks <- read_rds(all_tracks_path)
+
+# spots_pre_during summary
+spots_pre_during_step <- read_rds("../../data/tracks/pre_during_step_properties.rds")
+
+# tracks index
+tracks_index <- read_csv("../../data/index/tracks_index.csv")
+
+# tracks <-
+#   tracks %>%
+#   left_join(tracks_index, by = c("base_filename", "episode", "track_id"))
+
+# load master index for analysis
+index <- 
+  read_delim("../../data/index/high_speed_index.csv", delim = ",") %>%
+  filter(
+    protocol %in% 
+      c("step50ms", "step50mspos", "step50msvid", "step50msvidavg4", "step50msposvidavg4", "step5msvidavg4"),
+    track_mate_tracks == TRUE
+  ) %>%
+  select(-include, -best, -contains("notes_"), -contains("crop_"), -contains("gauss2d_"))
+
+```
+
+## expexponential fitting code
+```{r} 
+## exponential fitting code ==============================================
+
+doubleExp = function(params, x) {
+  # formula: y~ A0*exp(-x/tau0)) + A1*exp(-x/tau1)) + C0
+  A0 = as.numeric(params["A0"])
+  tau0 = as.numeric(params["tau0"])
+  A1 = as.numeric(params["A1"])
+  tau1 = as.numeric(params["tau1"])
+  C0 = as.numeric(params["C0"])
+  y = ((A0*exp(x/-tau0)) + (A1*exp(x/-tau1)) + C0)
+  return(y)
+}
+
+singleExp = function(params, x) {
+  # formula: y ~ A0*exp(-x/tau0)) + C0
+  A0 = as.numeric(params["A0"])
+  tau0 = as.numeric(params["tau0"])
+  C0 = as.numeric(params["C0"])
+  y = ((A0*exp(x/-tau0)) + (A1*exp(x/-tau1)) + C0)
+  return(y)
+}
+
+doubleExpFit = function(x, y, startList, lower, upper, weightList){
+  data = data.frame(x,y)
+  fitModel <- 
+    minpack.lm::nlsLM(y~((A0*exp(x/-tau0)) + (A1*exp(x/-tau1)) + C0),
+                      data = data,
+                      start = startList,
+                      lower = lower,
+                      upper = upper,
+                      weights = weightList,
+                      control = list(maxiter = 500,
+                                     minFactor = 1/500))
+  return(fitModel)
+}
+
+
+singleExpFit = function(x, y, startList, lower, upper, weightList){
+  data = data.frame(x,y)
+  fitModel <- 
+    minpack.lm::nlsLM(y ~ (A1 * exp(x/-tau1)) + C0,
+                      data = data,
+                      start = startList,
+                      lower = lower,
+                      upper = upper,
+                      weights = weightList,
+                      control = list(maxiter = 500,
+                                     minFactor = 1/500))
+  return(fitModel)
+}
+
+tryDoubleExpFit <- function(x, y, startList, lower, upper, weightList) {
+  out <- tryCatch(
+    {
+      doubleExpFit(x, y, startList, lower, upper, weightList)
+      # The return value of `doubleExpFit()` is the actual value 
+      # that will be returned in case there is no condition 
+      # (e.g. warning or error).   
+    },
+    error = function(cond) {
+      #print("in error part of try catch")
+      #message("Cannot be fit")
+      #message(cond)
+      # Choose a return value in case of error
+      return(NA_real_)
+    },
+    warning = function(cond) {
+      #print("in warning part of try catch")
+      #message("Warning")
+      #message(cond)
+      # Choose a return value in case of warning
+      return(NA_real_)
+    },
+    finally = {
+      # message("Some other message at the end")
+    }
+  )    
+  return(out)
+}
+
+trySingleExpFit <- function(x, y, startList, lower, upper, weightList) {
+  out <- tryCatch(
+    {
+      singleExpFit(x, y, startList, lower, upper, weightList)
+      # The return value of `doubleExpFit()` is the actual value 
+      # that will be returned in case there is no condition 
+      # (e.g. warning or error).   
+    },
+    error = function(cond) {
+      #print("in error part of try catch")
+      #message("Cannot be fit")
+      #message(cond)
+      # Choose a return value in case of error
+      return(NA_real_)
+    },
+    warning = function(cond) {
+      #print("in warning part of try catch")
+      #message("Warning")
+      #message(cond)
+      # Choose a return value in case of warning
+      return(NA_real_)
+    },
+    finally = {
+      # message("Some other message at the end")
+    }
+  )    
+  return(out)
+}
+```
+
+# Calculating peak displacements
+```{r}
+## Calculating summary data 
+#===========================================================================
+
+# Isochronal method - Probes
+probes_peak <-
+  all_tracks %>%
+  left_join(
+    index %>% select(base_filename, t_step_start), 
+    by = c("base_filename")
+  ) %>%
+  dplyr::filter(
+    track_id == 999,
+    time > t_step_start + 0.15,
+    time < t_step_start + 0.3
+  ) %>%
+  group_by(base_filename, episode) %>%
+  summarise(
+    probe_peak_nm_y = mean(position_nm_y_zeroed, na.rm = TRUE),
+    probe_peak_nm_x = mean(position_nm_x_zeroed, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Isochronal method - Stereocilia
+# includes peak of all individual stereocilia (peak_nm_), 
+# and the stereocilia with the largest displacement in the bundle (cilia_peak_nm_)
+tracks_peak <-
+  all_tracks %>%
+  left_join(
+    index %>% select(base_filename, t_step_start), 
+    by = c("base_filename")
+  ) %>%
+  group_by(base_filename, episode, track_id) %>%  
+  dplyr::filter(
+    track_id != 999,
+    low_noise == TRUE,
+    include == TRUE,
+    time > t_step_start + 0.15,
+    time < t_step_start + 0.3
+  ) %>%
+  summarise(
+    peak_nm_y = mean(position_nm_y_zeroed, na.rm = TRUE),
+    peak_nm_x = mean(position_nm_x_zeroed, na.rm = TRUE),
+    peak_nm_y_sd = sd(position_nm_y_zeroed, na.rm = TRUE),
+    peak_nm_y_n = n(),
+    peak_nm_y_se = peak_nm_y_sd / sqrt(peak_nm_y_n)
+  ) %>%
+  mutate(
+    cilia_peak_nm_y = max(peak_nm_y, na.rm = TRUE),
+    cilia_peak_nm_x = max(peak_nm_x, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Maximum method, captures "peakiness" 
+tracks_peak_max <-
+  all_tracks %>%
+  left_join(
+    index %>% select(base_filename, t_step_start), 
+    by = c("base_filename")
+  ) %>%
+  group_by(base_filename, episode, track_id) %>%
+  dplyr::filter(
+    track_id != 999,
+    include == TRUE,
+    low_noise == TRUE,
+    time > t_step_start,
+    time < t_step_start + 0.3
+  ) %>% 
+  summarise(
+    peak_nm_y_max = max(position_nm_y_zeroed, na.rm = TRUE),
+    time_peak_max = time[which.max(position_nm_y_zeroed)],
+    peak_nm_x_max = max(position_nm_x_zeroed, na.rm = TRUE),
+    time_peak_max_x = time[which.max(position_nm_x_zeroed)],
+    peak_nm_y_max_sd = sd(position_nm_y_zeroed, na.rm = TRUE),
+    peak_nm_y_max_n = n(),
+    peak_nm_y_max_se = peak_nm_y_max_sd / sqrt(peak_nm_y_max_n)
+  ) %>%
+  mutate(
+    cilia_peak_nm_y_max = max(peak_nm_y_max, na.rm = TRUE),
+    cilia_peak_nm_x_max = max(peak_nm_x_max, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+tracks_steady <-
+  all_tracks %>%
+  left_join(
+    index %>% select(base_filename, t_step_end), 
+    by = c("base_filename")
+  ) %>%
+  group_by(base_filename, episode, track_id) %>%
+  dplyr::filter(
+    track_id != 999,
+    include == TRUE, 
+    low_noise == TRUE,
+    time > t_step_end - 1, 
+    time < t_step_end
+  ) %>%
+  summarise(
+    steady_nm_y = median(position_nm_y_zeroed, na.rm = TRUE),
+    #steady_nm_y_mean = mean(position_nm_y_zeroed, na.rm = TRUE),
+    #delta = median(position_nm_y_zeroed, na.rm = TRUE) - mean(position_nm_y_zeroed, na.rm = TRUE),
+    steady_nm_x = median(position_nm_x_zeroed, na.rm = TRUE),
+    steady_nm_y_n = n(),
+    steady_nm_y_sd = sd(position_nm_y_zeroed, na.rm = TRUE),
+    steady_nm_y_se = steady_nm_y_sd / sqrt(steady_nm_y_n)
+  ) %>%
+  ungroup() 
+
+tracks_off_peak <-
+  all_tracks %>%
+  left_join(
+    index %>% select(base_filename, t_step_end), 
+    by = c("base_filename")
+  ) %>%
+  group_by(base_filename, episode, track_id) %>%  
+  dplyr::filter(
+    track_id != 999,
+    include == TRUE,
+    low_noise == TRUE,
+    time > t_step_end,
+    time < t_step_end + 0.4
+  ) %>%
+  summarise(
+    off_peak_nm_y = min(position_nm_y_zeroed, na.rm = TRUE),
+    time_off_peak = time[which.min(position_nm_y_zeroed)],
+    off_peak_nm_x = min(position_nm_x_zeroed, na.rm = TRUE)
+  ) %>%
+  ungroup()  
+
+tracks_off_steady <-
+  all_tracks %>%
+  left_join(
+    index %>% select(base_filename, t_step_end), 
+    by = c("base_filename")
+  ) %>%
+  group_by(base_filename, episode, track_id) %>%  
+  dplyr::filter(
+    track_id != 999,
+    include == TRUE,
+    low_noise == TRUE,
+    time > t_step_end + 1,
+    time < t_step_end + 5
+  ) %>%
+  summarise(
+    off_steady_nm_y = mean(position_nm_y_zeroed, na.rm = TRUE),
+    off_steady_nm_x = mean(position_nm_x_zeroed, na.rm = TRUE),
+    off_steady_sd_y = sd(position_nm_y_zeroed, na.rm = TRUE),
+    off_steady_sd_x = sd(position_nm_x_zeroed, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+tracks_rise_inflection <-
+  all_tracks %>%
+  left_join(
+    index %>% select(base_filename, t_step_start), 
+    by = c("base_filename")
+  ) %>%
+  filter(
+    track_id != 999,
+    include == TRUE,
+    low_noise == TRUE,
+    time < t_step_start
+  ) %>%
+  group_by(base_filename, episode, track_id) %>%
+  summarise(sd_d1 = sd(position_nm_y_zeroed_d1, na.rm = TRUE)) %>% 
+  ungroup() %>%
+  # ^ find the standard deviation of the first derivative of the baseline motion
+  left_join(all_tracks, ., by = c("base_filename", "episode", "track_id")) %>%
+  # ^ add all time points back 
+  # ^ (this seems computationally intensive, maybe there's a way to add fewer points back?)
+  left_join(
+    tracks_peak %>% select(base_filename, episode, track_id, peak_nm_y), 
+    by = c("base_filename", "episode", "track_id")
+  ) %>%
+  # ^ add the peak displacement for subsequent filtering
+  left_join(
+    index %>% select(base_filename, t_step_start), 
+    by = c("base_filename")
+  ) %>%
+  # ^ add t_step_start for subsequent filtering
+  group_by(base_filename, episode, track_id) %>%
+  # ^ separate stereocilia tracks
+  filter(
+    peak_nm_y > 75,
+    time > t_step_start, 
+    time < t_step_start + .3,
+    position_nm_y_zeroed_d1 > sd_d1
+  ) %>%
+  # ^ select only tracks where:
+  # the peak is > 75nm, the time is during the onset of motion, and the first 
+  # derivative is greater than the sd of the baseline first derivative
+  top_n(1, position_nm_y_zeroed_d1) %>%
+  # ^ take the row (point in time) with the steepest slope (highest first derivative of motion)
+  ungroup() %>%
+  group_by(base_filename, episode) %>%
+  mutate(rise_delta_t_inflection = time - min(time)) %>%
+  # ^ of all the stereocilia motion trajectory peak first derivatives in that episode, what is the difference in timing?
+  rename(
+    rise_t_inflection = time,
+    rise_peak_slope = position_nm_y_zeroed_d1
+  ) %>%
+  ungroup() %>%
+  select(
+    base_filename, 
+    episode, 
+    track_id, 
+    rise_t_inflection, 
+    rise_delta_t_inflection, 
+    rise_peak_slope
+  ) %>%
+  ungroup()
+```
+
+## New way of calculating timing:
+Time of each stereocilium to some given distance. 
+Saves to a separate onset timing data frame to access in figure_timing_v2.Rmd
+```{r}
+tracks_timing <-
+  all_tracks %>%
+  left_join(
+    index %>% select(base_filename, t_step_start),
+    by = c("base_filename")
+  ) %>%
+  filter(
+    track_id != 999,
+    include == TRUE,
+    low_noise == TRUE,
+    time < t_step_start + 1,
+    time >= t_step_start
+  )
+
+tracks_timing <-
+  tracks_timing %>%
+  group_by(base_filename, episode, track_id) %>%
+  summarise(sd_baseline = sd(position_nm_y_zeroed, na.rm = TRUE)) %>% 
+  ungroup() %>%
+  # ^ find the standard deviation of the baseline motion
+  left_join(tracks_timing, ., by = c("base_filename", "episode", "track_id")) %>%
+  left_join(
+    tracks_peak %>% select(base_filename, episode, track_id, peak_nm_y), 
+    by = c("base_filename", "episode", "track_id")
+  ) %>%  
+  # ^ add the peak displacement for subsequent filtering
+  # group_by(base_filename, episode, track_id) %>%
+  # # ^ separate stereocilia tracks
+  filter(
+    peak_nm_y > 75,
+    time > t_step_start, 
+    time < t_step_start + .5,
+    peak_nm_y > sd_baseline
+  )
+  # ^ select only tracks where:
+  # the peak is > 75nm, the time is during the onset of motion, and the peak 
+  # is greater than the sd of the baseline motion
+
+tracks_onset_interpolated <-
+  tracks_timing %>%
+  group_by(base_filename, episode, track_id) %>%
+  summarise(
+    interpolated = 
+      approx(time, position_nm_y_zeroed, xout = seq(min(time), max(time), 0.001)) %>% 
+      as.data.frame() %>% 
+      list()
+    ) %>%
+  unnest() %>%
+  rename(time = x, position_nm_y_zeroed = y) %>%
+  ungroup()
+  # ^ for each track, linearly interpolate displacements at 0.001 ms apart
+
+tracks_timing_to_distance <-
+  tracks_onset_interpolated %>%
+  group_by(base_filename, episode, track_id) %>%
+  filter(position_nm_y_zeroed <= 50) %>%
+  top_n(1, time) %>%
+  # ^ for each track, find the time at which the trajectory reaches 50 nm
+  ungroup() %>%
+  rename(t_to_50nm = time) 
+
+tracks_timing_to_distance2 <-
+  tracks_onset_interpolated %>%
+  group_by(base_filename, episode, track_id) %>%
+  filter(position_nm_y_zeroed <= 20) %>%
+  top_n(1, time) %>%
+  # ^ for each track, find the time at which the trajectory reaches 20 nm
+  ungroup() %>%
+  rename(t_to_20nm = time) 
+
+tracks_timing_25_75 <-
+  tracks_onset_interpolated %>%
+  left_join(
+    tracks_peak %>% select(base_filename, episode, track_id, peak_nm_y), 
+    by = c("base_filename", "episode", "track_id")
+  ) %>% 
+  group_by(base_filename, episode, track_id) %>%
+  # mutate(
+  #   position_nm_y_zeroed_10p = peak_nm_y * 0.25, 
+  #   position_nm_y_zeroed_90p = peak_nm_y * 0.75
+  # ) %>%
+  filter(
+    position_nm_y_zeroed >= peak_nm_y * 0.25,
+    position_nm_y_zeroed <= peak_nm_y * 0.75
+  ) %>%
+  slice(c(1,n())) %>%
+  mutate(names = c("t_25", "t_75")) %>%
+  ungroup() %>%
+  # ^ for each track, find the time at which the trajectory reaches 10% and 90%
+  #pivot_wider(names_from = names, values_from = time)
+  select(-position_nm_y_zeroed) %>%
+  spread(key = names, value = time) %>%
+  mutate(t_rise_25_75 = t_75 - t_25)
+
+tracks_onset_timings <-
+  tracks_timing_to_distance %>%
+  left_join(tracks_timing_to_distance2, by = c("base_filename", "episode", "track_id")) %>%
+  left_join(tracks_timing_25_75, by = c("base_filename", "episode", "track_id"))
+
+write_rds(
+  tracks_onset_timings, 
+  "/Volumes/GoogleDrive/My Drive/AlexTony/Projects/movementAnalysis/data/tracks_summary_onset.rds"
+  )
+write_csv(
+  tracks_onset_timings, 
+  "/Volumes/GoogleDrive/My Drive/AlexTony/Projects/movementAnalysis/data/tracks_summary_onset.csv"
+  )
+
+## Code used to figure out how to get timing at a given displacement
+# test <-
+#   tracks_onset_interpolated %>%
+#   filter(
+#     base_filename == tracks_timing$base_filename[[1]] | base_filename == tracks_timing$base_filename[[200]]  | base_filename == tracks_timing$base_filename[[400]] ,
+#     episode == tracks_timing$episode[[1]] |  episode == tracks_timing$episode[[200]] |  episode == tracks_timing$episode[[400]],
+#     track_id == tracks_timing$track_id[[1]] | track_id == tracks_timing$track_id[[200]] | track_id == tracks_timing$track_id[[400]]
+#   ) %>%
+#   group_by(base_filename, episode, track_id) %>%
+#   filter(position_nm_y_zeroed <= 50) %>%
+#   arrange(time)
+# 
+# test %>%
+#   ggplot(aes(x = time, y = position_nm_y_zeroed, group = interaction(base_filename, episode, track_id))) +
+#   geom_point()
+# 
+# test %>%
+#   top_n(1, time) %>%
+#     ggplot(aes(x = time, y = position_nm_y_zeroed, group = interaction(base_filename, episode, track_id))) +
+#   geom_point()
+
+## Code used to figure out how to do interpolation and add to data frame
+# test <-
+#   tracks_timing %>% 
+#   filter(
+#     base_filename == tracks_timing$base_filename[[1]] | base_filename == tracks_timing$base_filename[[200]] ,
+#     episode == tracks_timing$episode[[1]] |  episode == tracks_timing$episode[[200]],
+#     track_id == tracks_timing$track_id[[1]] | track_id == tracks_timing$track_id[[200]]
+#   )
+# 
+# test_interp <- approx(test$time, test$position_nm_y_zeroed, xout = seq(min(test$time), max(test$time), 0.001))
+# 
+# test %>%
+#   ggplot(aes(x = time, y = position_nm_y_zeroed, color = track_id)) +
+#   geom_point()
+# 
+# test_interp %>%
+#   as.data.frame() %>% nrow()
+#   ggplot(aes(x = x, y = y)) +
+#   geom_point()
+#   
+# test %>%
+#   group_by(base_filename, episode, track_id) %>%
+#   summarise(
+#     interpolated = 
+#       approx(time, position_nm_y_zeroed, xout = seq(min(time), max(time), 0.001)) %>% 
+#       as.data.frame() %>% 
+#       list()
+#     ) %>%
+#   unnest() %>%
+#   ggplot(aes(x = x, y = y, group = interaction(base_filename, episode, track_id), color = as.factor(track_id))) +
+#   geom_point()
+```
+
+## Combine tracks summaries & calculate mag reverse, percent reverse etc
+Reverse motion is calculated if the peak displacement - steady state is greater than 2 x SD of the pre-step SD of movement AND peak motion is greater than 2 x SD pre step SD of movement (If you want to relax these requirements to look for the "peaky" reverse motions. Go with the max peak value and only 1 SD greater than noise)
+```{r}
+tracks_summary <-
+  tracks_peak %>%
+  left_join(tracks_peak_max, by = c("base_filename", "episode", "track_id")) %>%
+  left_join(tracks_steady, by = c("base_filename", "episode", "track_id")) %>%
+  left_join(tracks_off_peak, by = c("base_filename", "episode", "track_id")) %>%
+  left_join(tracks_off_steady, by = c("base_filename", "episode", "track_id")) %>%
+  left_join(probes_peak, by = c("base_filename", "episode")) %>%
+  left_join(
+    spots_pre_during_step %>% 
+      select(base_filename, episode, track_id, prestep_sd_y, step_sd_y, prestep_sd_x, step_sd_x), 
+    by = c("base_filename", "episode", "track_id")
+    ) %>%
+  mutate(
+    mag_reverse = 
+      case_when(
+        peak_nm_y_max < (2 * prestep_sd_y) |
+          (peak_nm_y_max - steady_nm_y) < (2 * step_sd_y) | 
+          steady_nm_y < 0 - (3 * prestep_sd_y) ~ 
+          0, 
+        peak_nm_y_max >= (2 * prestep_sd_y) & 
+          (peak_nm_y_max - steady_nm_y) >=  (2 * step_sd_y) & 
+          steady_nm_y >= 0 - (3 * prestep_sd_y) ~ 
+          peak_nm_y_max - steady_nm_y,
+        TRUE ~ 
+          NA_real_
+      ),
+    percent_reverse = mag_reverse / peak_nm_y_max,
+    mag_reverse_x = 
+      case_when(
+        peak_nm_x_max < (2 * prestep_sd_x) | 
+          (peak_nm_x_max - steady_nm_x) < (2 * step_sd_x) | 
+          steady_nm_x < 0 - (3 * prestep_sd_x) ~ 
+          0, 
+        peak_nm_x_max >= (2 * prestep_sd_x) & 
+          (peak_nm_x_max - steady_nm_x) >= (2 * step_sd_x) & 
+          steady_nm_x >= 0 - (3 * prestep_sd_x) ~ 
+          peak_nm_x_max - steady_nm_x,
+        TRUE ~ 
+          NA_real_
+      ),
+    percent_reverse_x = mag_reverse_x / peak_nm_x_max
+  ) %>%
+  mutate(
+    off_mag = steady_nm_y - off_peak_nm_y,
+    off_notch = 
+      case_when(
+        off_peak_nm_y < off_steady_nm_y & 
+          abs(off_peak_nm_y) > (2 * off_steady_sd_y) & 
+          off_steady_nm_y < (3 * prestep_sd_y) ~ 
+          abs(off_peak_nm_y - off_steady_nm_y),
+        off_peak_nm_y >= off_steady_nm_y | 
+          abs(off_peak_nm_y) <= (2 * off_steady_sd_y) | 
+          off_steady_nm_y >= (3 * prestep_sd_y) | 
+          (off_peak_nm_y > 0) ~ 
+          0,
+        TRUE ~ 
+          NA_real_
+      )
+  ) %>%
+  left_join(tracks_rise_inflection, by = c("base_filename", "episode", "track_id")) %>%
+  left_join(
+    tracks_index,
+    by = c("base_filename", "episode", "track_id")
+  ) %>%
+  left_join(
+    index,
+    by = c("base_filename")
+  ) %>%
+  mutate(
+    holding = if_else(str_detect(protocol, "pos"), 80, -80),
+    contact =
+      case_when(
+        direct_contact == TRUE ~ "direct",
+        indirect_contact == TRUE ~ "indirect",
+        TRUE ~ "none"
+      ),
+    side = if_else(position_id > 0, "right", "left"),
+    side = if_else(position_id == 0, "center", side)
+    ) %>%
+  filter(include == TRUE, is_probe == FALSE) %>%
+  select(
+    date, age, sex, location, probe,
+    cell_id, folder_name,
+    base_filename, episode, 
+    focal_row, cilium_row, 
+    track_id, position_id,
+    everything()
+  ) %>%
+  select(
+    -include, -track_mate_tracks, -track_index, -I_peak_pA, -leak_pA, -cm, -rs, 
+    -step_size_mV, -um_mV, -direct_contact, -indirect_contact, -bundle_row, -is_probe
+  )
+```
+
+
+# Add fits
+Fitting first 25 ms
+```{r}
+tracks_fits_1 <- # fit 25 ms
+  all_tracks %>%
+  inner_join(
+    tracks_summary %>% 
+      select(base_filename, episode, track_id, mag_reverse, time_peak_max, t_step_start, t_step_end) %>%
+      filter(mag_reverse > 0),
+    by = c("base_filename", "episode", "track_id")
+  ) %>%
+  #single_track %>%
+  mutate(
+    #t_fit_start = t_step_start + .2, # for isochronal peak, add amount of time to peak
+    t_fit_start = time_peak_max, # use this if max was taken at peak
+    t_fit_end = map2_dbl(t_step_end, t_step_start, ~ min(.x, .y + 25, na.rm = TRUE))
+  ) %>%
+  filter(
+    time > t_fit_start, 
+    time < t_fit_end
+  ) %>%
+  group_by(base_filename, episode, track_id, t_fit_start, t_fit_end) %>%  
+  summarise(
+    fit_dbl = 
+      tryDoubleExpFit(
+        x = time - first(time), 
+        y = position_nm_y_zeroed,
+        startList = 
+          list(
+            A0 = (first(position_nm_y_zeroed) - last(position_nm_y_zeroed)) / 2,
+            #tau0 = (last(time) - first(time)) / 5,
+            tau0 = 5,
+            A1 = (first(position_nm_y_zeroed) - last(position_nm_y_zeroed)) / 2,
+            #tau1 = (last(time) - first(time)) / 20,
+            tau1 = .5,
+            C0 = last(position_nm_y_zeroed)
+          ),
+        lower = c(0, 0, 0, 0, 0), # limits c(A0, tau0, A1, tau1, C0)
+        upper = 
+          c(
+            1000, 
+            1000, #(last(time) - first(time)) / 3, 
+            1000, 
+            1000, #(last(time) - first(time)) / 3, 
+            2000
+          ), # limits c(A0, tau0, A1, tau1, C0)
+        weightList = 
+          rep(1, length(position_nm_y_zeroed))
+          #exp(-(seq(1:length(position_nm_y_zeroed))) / (length(position_nm_y_zeroed) / 15))
+      ) %>%
+      list(),
+    fit_sgl = 
+      trySingleExpFit(
+        x = time - first(time), 
+        y = position_nm_y_zeroed,
+        startList = 
+          list(
+            A1 = (first(position_nm_y_zeroed) - last(position_nm_y_zeroed)) / 2,
+            #tau1 = (last(time) - first(time)) / 5,
+            tau1 = .5,
+            C0 = last(position_nm_y_zeroed)
+          ),
+        lower = c(0, 0, 0), # limits c(A1, tau1, C0)
+        upper = 
+          c(
+            1000, 
+            1000, #(last(time) - first(time)) / 3, 
+            2000
+          ), # limits c(A0, tau0, A1, tau1, C0)
+        weightList = 
+          rep(1, length(position_nm_y_zeroed))
+          #exp(-(seq(1:length(position_nm_y_zeroed))) / (length(position_nm_y_zeroed) / 1))
+      ) %>%
+      list(),
+    predict_time = list(time)
+  ) %>%
+  ungroup() %>%
+  mutate(    
+    predict_dbl = map(fit_dbl, ~ if(!is.na(.[1])) {predict(.)} else {NA_real_}),
+    predict_sgl = map(fit_sgl, ~ if(!is.na(.[1])) {predict(.)} else {NA_real_})
+  )
+
+tracks_fits_2 <- # fit 5ms
+  all_tracks %>%
+  inner_join(
+    tracks_summary %>% 
+      select(base_filename, episode, track_id, mag_reverse, time_peak_max, t_step_start, t_step_end) %>%
+      filter(mag_reverse > 0),
+    by = c("base_filename", "episode", "track_id")
+  ) %>%
+  #single_track %>%
+  mutate(
+    #t_fit_start = t_step_start + .2, # for isochronal peak, add amount of time to peak
+    t_fit_start = time_peak_max, # use this if max was taken at peak
+    t_fit_end = map2_dbl(t_step_end, t_step_start, ~ min(.x, .y + 2, na.rm = TRUE))
+  ) %>%
+  filter(    
+    time > t_fit_start,
+    time < t_fit_end
+  ) %>%
+  group_by(base_filename, episode, track_id, t_fit_start, t_fit_end) %>%  
+  summarise(
+    fit_sgl_short = 
+      trySingleExpFit(
+        x = time - first(time), 
+        y = position_nm_y_zeroed,
+        startList = 
+          list(
+            A1 = (first(position_nm_y_zeroed) - last(position_nm_y_zeroed)) / 2,
+            #tau1 = (last(time) - first(time)) / 20,
+            tau1 = .5,
+            C0 = last(position_nm_y_zeroed)
+          ),
+        lower = c(0, 0, 0), # limits c(A1, tau1, C0)
+        upper = 
+          c(
+            1000, 
+            1000, #(last(time) - first(time)) / 3, 
+            2000
+          ), # limits c(A0, tau0, A1, tau1, C0)
+        weightList = 
+          rep(1, length(position_nm_y_zeroed))
+          #exp(-(seq(1:length(position_nm_y_zeroed))) / (length(position_nm_y_zeroed) / 1))
+      ) %>%
+      list(),
+    predict_time_short = list(time)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    predict_sgl_short = map(fit_sgl_short, ~ if(!is.na(.[1])) {predict(.)} else {NA_real_})
+  ) %>%
+  select(base_filename, episode, track_id, fit_sgl_short, predict_time_short, predict_sgl_short)
+
+tracks_fits_off <-
+  all_tracks %>%
+  inner_join(
+    tracks_summary %>% 
+      select(base_filename, episode, track_id, off_notch, time_off_peak) %>%
+      filter(off_notch > 0),
+    by = c("base_filename", "episode", "track_id")
+  ) %>%
+  #single_track %>%
+  mutate(
+    t_fit_start = time_off_peak, # use this if max was taken at peak
+    t_fit_end = time_off_peak + 3 # previous to 6/19, did 5 ms
+  ) %>%
+  filter(
+    time > t_fit_start, 
+    time < t_fit_end
+  ) %>%
+  group_by(base_filename, episode, track_id, t_fit_start, t_fit_end, off_notch, time_off_peak) %>%  
+  summarise(
+    fit_sgl_off = 
+      trySingleExpFit(
+        x = time - first(time), 
+        y = position_nm_y_zeroed,
+        startList = 
+          list(
+            A1 = (first(position_nm_y_zeroed) - last(position_nm_y_zeroed)) / 2,
+            tau1 = .5,
+            C0 = last(position_nm_y_zeroed)
+          ),
+        lower = c(-5000, 0, -5000), # limits c(A1, tau1, C0)
+        upper = c(0, 10, 2000), # limits c(A1, tau1, C0)
+        weightList = 
+          rep(1, length(position_nm_y_zeroed))
+      ) %>%
+      list(),
+    predict_time_off = list(time)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    predict_sgl_off = map(fit_sgl_off, ~ if(!is.na(.[1])) {predict(.)} else {NA_real_})
+  ) %>%
+  select(base_filename, episode, track_id, time_off_peak, off_notch, fit_sgl_off, predict_time_off, predict_sgl_off)
+
+# # weight list
+# x = seq(1:100)
+# y = exp(-(seq(1:100)) / (100 / 1))
+# plot(x, y)
+```
+
+```{r}
+#tracks_fits_2$fit_sgl[[1]] %>% summary()
+
+#tau1 is fast
+#tau0 is slow
+
+tracks_fits <-
+  tracks_fits_1 %>%
+  left_join(tracks_fits_2, by = c("base_filename", "episode", "track_id")) %>%
+  left_join(tracks_fits_off, by = c("base_filename", "episode", "track_id")) %>%
+  mutate(
+    tau1_sgl = map_dbl(fit_sgl, ~ if(!is.na(.[1])) {coef(.)["tau1"]} else {NA_real_}),
+    tau1_sgl_short = map_dbl(fit_sgl_short, ~ if(!is.na(.[1])) {coef(.)["tau1"]} else {NA_real_}),
+    tau1_sgl_off = map_dbl(fit_sgl_off, ~ if(is.list(.[1])) {coef(.)["tau1"]} else {NA_real_}),
+    
+    tau1_dbl = map_dbl(fit_dbl, ~ if(!is.na(.[1])) {coef(.)["tau1"]} else {NA_real_}),  
+    tau0_dbl = map_dbl(fit_dbl, ~ if(!is.na(.[1])) {coef(.)["tau0"]} else {NA_real_}),
+    
+    # record whether tau1 goes with fast for slow (for setting As later)
+    tau1_dbl_fast = if_else(tau1_dbl < tau0_dbl, TRUE, FALSE), 
+    
+    # Set fast time constant to be fast, and slow to be slow
+    tau1_dbl = pmin(tau1_dbl, tau0_dbl), 
+    tau0_dbl = pmax(tau1_dbl, tau0_dbl),
+    
+    # getting A0 and A1 parameters
+    A1_sgl = map_dbl(fit_sgl, ~ if(!is.na(.[1])) {coef(.)["A1"]} else {NA_real_}),
+    A1_sgl_off = map_dbl(fit_sgl_off, ~ if(is.list(.[1])) {coef(.)["A1"]} else {NA_real_}),
+    A1_dbl = map_dbl(fit_dbl, ~ if(!is.na(.[1])) {coef(.)["A1"]} else {NA_real_}),
+    A0_dbl = map_dbl(fit_dbl, ~ if(!is.na(.[1])) {coef(.)["A0"]} else {NA_real_}),
+    
+    #make sure double fit As match the correct time constant
+    A1_dbl = if_else(tau1_dbl_fast == TRUE, A1_dbl, A0_dbl),
+    A0_dbl = if_else(tau1_dbl_fast == TRUE, A0_dbl, A1_dbl)
+    
+    #resid_sd_sgl = map_dbl(fit_sgl, ~ if(!is.na(.[1])) {sigma(.)} else {NA_real_}),
+    #resid_sd_dbl = map_dbl(fit_dbl, ~ if(!is.na(.[1])) {sigma(.)} else {NA_real_})
+  ) %>%
+  mutate(
+    best_fit = 
+      case_when(
+        
+        # if its a single AND NOT a double
+        # AND single fit tau 1 is fast enough
+        # ---OR---
+        # if fits a single AND fits a double
+        # AND single fit tau1 is fast enough
+        # AND double fit has too slow a tau0 OR (EXCLUDING TOO SLOW REASON FOR NOW)
+        #   too fast a tau1 OR (EXCLUDING TOO FAST REASON FOR NOW)
+        #   the step is very short OR (EXCLUDING TOO SHORT REASON FOR NOW)
+        #   both tau0 and tau1 of the double fit are less than 1ms different
+        # THEN the best fit is single
+        
+        (!(fit_sgl %>% is.na()) & (fit_dbl %>% is.na()) & 
+           tau1_sgl < ((t_fit_end - t_fit_start) / 3)) |
+        # ---OR---
+        (!(fit_sgl %>% is.na()) & !(fit_dbl %>% is.na()) & 
+          tau1_sgl < ((t_fit_end - t_fit_start) / 3) &
+          #(tau0_dbl > ((t_fit_end - t_fit_start) / 3) | 
+          (tau1_dbl < 0.001 | 
+             #t_fit_end - t_fit_start < 15 |
+             abs(tau0_dbl - tau1_dbl) < 1))
+          ~ "single", 
+        
+        # if its a double AND NOT a single
+        # AND double fit has fast enough tau0 AND (EXCLUDING TOO FAST REASON FOR NOW)
+        #   slow enough a tau1 AND (EXCLUDING TOO SLOW REASON FOR NOW)
+        #   the step is long enough AND
+        #   both tau0 and tau1 of the double fit are more than than 2 ms different
+        # ---OR---
+        # if fits a single AND fits a double
+        # AND double fit has fast enough tau0 AND  (EXCLUDING TOO FAST REASON FOR NOW)
+        #   slow enough a tau1 AND (EXCLUDING TOO SLOW REASON FOR NOW)
+        #   the step is long enough AND (EXCLUDING TOO SHORT REASON FOR NOW)
+        #   both tau0 and tau1 of the double fit are more than than 2 ms different
+        
+        (!(fit_dbl %>% is.na()) & (fit_sgl %>% is.na()) &
+          tau0_dbl < t_fit_end - t_fit_start &
+           #(tau0_dbl < ((t_fit_end - t_fit_start) / 3) & 
+           #(tau1_dbl > 0.001 & 
+           # (t_fit_end - t_fit_start > 15 &
+              (abs(tau0_dbl - tau1_dbl) > 1)) |
+        # ---OR---
+        (!(fit_sgl %>% is.na()) & !(fit_dbl %>% is.na()) & 
+           tau0_dbl < t_fit_end - t_fit_start &
+          #(tau0_dbl < ((t_fit_end - t_fit_start) / 3) & 
+          #(tau1_dbl > 0.001 & 
+          #(t_fit_end - t_fit_start > 15) &
+              (abs(tau0_dbl - tau1_dbl) > 1))
+          ~ "double", 
+        TRUE ~ NA_character_
+      ),
+    best_fit = # second round of best fit determination
+      case_when(
+        best_fit == "double" & 
+          tau0_dbl > 50 &
+          tau1_sgl_short < ((t_fit_end - t_fit_start) / 3) ~ "single_short",
+        is.na(best_fit) &
+          tau1_sgl_short < ((t_fit_end - t_fit_start) / 3) ~ "single_short",
+        TRUE ~ best_fit
+      ),
+    tau_fast = 
+      case_when(
+      best_fit == "single" ~ tau1_sgl,
+      best_fit == "double" ~ tau1_dbl,
+      best_fit == "single_short" ~ tau1_sgl_short,
+      TRUE ~ NA_real_
+    ),
+    tau_slow = 
+      case_when(
+        best_fit == "double" ~ tau0_dbl,
+        TRUE ~ NA_real_
+      ),
+    tau_off = case_when(
+      tau1_sgl_off < 10 ~ tau1_sgl_off,
+      TRUE ~ NA_real_
+    )
+  )
+
+
+```
+
+# plot fits against data
+```{r, eval = FALSE}
+plot_raw_pred <- function(b, e, t, best){
+  curr_fit <-         
+    tracks_fits %>%
+        filter(
+          base_filename == b, 
+          episode == e, 
+          track_id == t
+        )
+  
+  df_predict_1 <-
+    tibble(
+      time = curr_fit %>% select(predict_time) %>% unlist(),
+      predict_1 = curr_fit %>% select(predict_sgl) %>% unlist()
+    )
+  
+  df_predict_2 <-
+    tibble(
+      time = curr_fit %>% select(predict_time) %>% unlist(),
+      predict_2 = curr_fit %>% select(predict_dbl) %>% unlist()
+    )
+  
+  df_predict_3 <-
+    tibble(
+      time = curr_fit %>% select(predict_time_short) %>% unlist(),
+      predict_3 = curr_fit %>% select(predict_sgl_short) %>% unlist()
+    )
+  
+  df_raw <-
+    all_tracks %>% 
+    filter(
+      base_filename == b, 
+      episode == e, 
+      track_id == t
+    ) %>% 
+    select(time, position_nm_y_zeroed)
+  
+  p <- ggplot() +
+    geom_line(data = df_raw, aes(x = time, y = position_nm_y_zeroed)) +
+    geom_line(data = df_predict_2, aes(x = time, y = predict_2), color = "red") +
+    geom_line(data = df_predict_1, aes(x = time, y = predict_1), color = "yellow") +
+    geom_line(data = df_predict_3, aes(x = time, y = predict_3), color = "green") +
+    labs(title = str_c(b, " - ", t, " - ", paste(best)))#, subtitle = paste(best))
+  ggplotly(p)
+}
+
+tracks_fits[sample(seq(1:nrow(tracks_fits)), 10),] %>%
+  select(base_filename, episode, track_id, best_fit) %>%
+  pmap(~ plot_raw_pred(b = ..1, e = ..2, t = ..3, best = ..4))  
+
+#plot_raw_pred(b = "S8731024", e = 1, t = 8, b = "double")
+
+#tracks_fits[2,]$fit_dbl[[1]] %>% summary()
+
+tracks_fits %>%
+  filter(base_filename == "S8731024", episode == 1, track_id == 29) %>%
+  select(base_filename, episode, track_id, best_fit) %>%
+  pmap(~ plot_raw_pred(b = ..1, e = ..2, t = ..3, best = ..4))  
+
+```
+
+# plot fits against data - off notch
+```{r, eval = FALSE}
+plot_raw_pred <- function(b, e, t){
+  curr_fit <-         
+    tracks_fits_off %>%
+        filter(
+          base_filename == b, 
+          episode == e, 
+          track_id == t
+        )
+  
+  df_predict <-
+    tibble(
+      time = curr_fit %>% select(predict_time_off) %>% unlist(),
+      predict = curr_fit %>% select(predict_sgl_off) %>% unlist()
+    )
+  
+  df_raw <-
+    all_tracks %>% 
+    filter(
+      base_filename == b, 
+      episode == e, 
+      track_id == t
+    ) %>% 
+    select(time, position_nm_y_zeroed)
+  
+  p <- ggplot() +
+    geom_line(data = df_raw, aes(x = time, y = position_nm_y_zeroed)) +
+    geom_line(data = df_predict, aes(x = time, y = predict), color = "red") +
+    geom_vline(data = curr_fit, aes(xintercept = time_off_peak), color = "blue") +
+    labs(title = str_c(b, " - ", t))#, subtitle = paste(best))
+  ggplotly(p)
+}
+
+curr_df <-
+  tracks_fits_off %>%
+  filter(off_notch > 0)
+
+curr_df[sample(seq(1:nrow(curr_df)), 10),] %>%
+  select(base_filename, episode, track_id) %>%
+  pmap(~ plot_raw_pred(b = ..1, e = ..2, t = ..3))  
+
+# tracks_fits_off %>%
+#   filter(base_filename == "S8731024", episode == 1, track_id == 29) %>%
+#   select(base_filename, episode, track_id) %>%
+#   pmap(~ plot_raw_pred(b = ..1, e = ..2, t = ..3))  
+
+```
+
+```{r}
+tracks_summary_1 <-
+  tracks_summary %>%
+  left_join(
+    tracks_fits %>% select(-off_notch, -time_off_peak), 
+    by = c("base_filename", "episode", "track_id")
+  ) %>%
+  #select(-time) %>% 
+  ungroup() %>%
+  mutate(
+    displacement_include = 
+      case_when(
+        cell_id == "20180731b2" & is.na(push_location) ~ "TRUE", # probe is touching stereocilia -1 and 0, both sides can be used
+        cell_id == "20180731c4" & is.na(push_location) & position_id <= -1 ~ "TRUE", # both sides, -1 and 2
+        cell_id == "20180731c4" & is.na(push_location) & position_id >= 2 ~ "TRUE",
+        cell_id == "20180731c4" & push_location == "right" & position_id <= 5 ~ "TRUE",
+        cell_id == "20180731c4" & push_location == "left" & position_id >= -4 ~ "TRUE",
+        cell_id == "20180802b2" & is.na(push_location) & position_id <= 0 ~ "TRUE",
+        cell_id == "20180802c2" & is.na(push_location) ~ "TRUE", # both sides, 0 and 1
+        cell_id == "20180803a1" & is.na(push_location) & position_id >= 1 ~ "TRUE",
+        cell_id == "20180803a1" & push_location == "right" & position_id <= 6 ~ "TRUE",
+        cell_id == "20180804b3" & is.na(push_location) & position_id <= -1 ~ "TRUE",
+        cell_id == "20180807c3" & is.na(push_location) ~ "TRUE", # probe is really just touching center stereocilium, both sides can be used
+        cell_id == "20180807c3" & push_location == "left" & position_id >= -6 ~ "TRUE",
+        cell_id == "20180808a3" & is.na(push_location) & position_id <= -1 ~ "TRUE",
+        cell_id == "20180809b2" & is.na(push_location) & position_id <= -1 ~ "TRUE",
+        # cell_id == "20180809b3" ~ "FALSE", # probe-touched-stereocilia were not tracked. No accurate 0 position
+        # cell_id == "20180810a1" ~ "FALSE", # overlapped stereocilia in middle, missing 0 position
+        cell_id == "20180811a1" & is.na(push_location) & position_id <= -1 ~ "TRUE",
+        cell_id == "20180811a2" & is.na(push_location) ~ "TRUE", # both sides, -1 and 0,
+        # cell_id == "20180811b3" ~ "FALSE", # maybe left side, starting at -1 would be ok
+        cell_id == "20180815b3" & is.na(push_location) ~ "TRUE", # both sides, around -1 and 1,
+        cell_id == "20180815b3" & push_location == "left" & position_id >= -3 ~ "TRUE", # to the right of -3,
+        cell_id == "20180815b3" & push_location == "right" & position_id <= 7 ~ "TRUE" # to the left of 7
+      ),
+    displacement_edge = 
+      case_when(
+        cell_id == "20180731b2" & is.na(push_location) & side == "left" ~ -1,
+        cell_id == "20180731b2" & is.na(push_location) & side != "left" ~ 0,
+        cell_id == "20180731c4" & is.na(push_location) & side == "left" ~ -1,
+        cell_id == "20180731c4" & is.na(push_location) & side == "right" ~ 2,
+        cell_id == "20180731c4" & push_location == "right" ~ 5,
+        cell_id == "20180731c4" & push_location == "left" ~ -4,
+        cell_id == "20180802b2" & is.na(push_location) ~ 0,
+        cell_id == "20180802c2" & is.na(push_location) & side != "right" ~ 0, # both sides, 0 and 1
+        cell_id == "20180802c2" & is.na(push_location) & side == "right" ~ 1, # both sides, 0 and 1
+        cell_id == "20180803a1" & is.na(push_location) ~ 1,
+        cell_id == "20180803a1" & push_location == "right" ~ 6,
+        cell_id == "20180804b3" & is.na(push_location) ~ -1,
+        cell_id == "20180807c3" & is.na(push_location) ~ 0, # 0 is last touched for both sides
+        cell_id == "20180807c3" & push_location == "left" ~ -5, 
+        cell_id == "20180808a3" & is.na(push_location) ~ -1,
+        cell_id == "20180809b2" & is.na(push_location) ~ -1,
+        cell_id == "20180811a1" & is.na(push_location) ~ -1,
+        cell_id == "20180811a2" & is.na(push_location) & side == "left" ~ -1,
+        cell_id == "20180811a2" & is.na(push_location) & side != "left" ~ 0,
+        cell_id == "20180815b3" & is.na(push_location) & side == "left" ~ -1, 
+        cell_id == "20180815b3" & is.na(push_location) & side != "left" ~ 1,
+        cell_id == "20180815b3" & push_location == "left" ~ -3,
+        cell_id == "20180815b3" & push_location == "right" ~ 7
+      ),
+    normalized_side = 
+      case_when(
+        cell_id == "20180731b2" & is.na(push_location) & side == "left" ~ "left",
+        cell_id == "20180731b2" & is.na(push_location) & side != "left" ~ "right",
+        cell_id == "20180731c4" & is.na(push_location) & side == "left" ~ "left",
+        cell_id == "20180731c4" & is.na(push_location) & side == "right" ~ "right",
+        cell_id == "20180731c4" & push_location == "right" ~ "left",
+        cell_id == "20180731c4" & push_location == "left" ~ "right",
+        cell_id == "20180802b2" & is.na(push_location) & side == "left" ~ "left",
+        cell_id == "20180802b2" & is.na(push_location) & side != "left" ~ "right",
+        cell_id == "20180802c2" & is.na(push_location) & side != "right" ~ "left", # both sides, 0 and 1
+        cell_id == "20180802c2" & is.na(push_location) & side == "right" ~ "right", # both sides, 0 and 1
+        cell_id == "20180803a1" & is.na(push_location) ~ "right",
+        cell_id == "20180803a1" & push_location == "right" ~ "left",
+        cell_id == "20180804b3" & is.na(push_location) ~ "left",
+        cell_id == "20180807c3" & is.na(push_location) & side == "left" ~ "left", # 0 is last touched for both sides
+        cell_id == "20180807c3" & is.na(push_location) & side != "left" ~ "right", # 0 is last touched for both sides
+        cell_id == "20180807c3" & push_location == "left" ~ "right",
+        cell_id == "20180808a3" & is.na(push_location) ~ "left",
+        cell_id == "20180809b2" & is.na(push_location) ~ "left",
+        cell_id == "20180811a1" & is.na(push_location) ~ "left",
+        cell_id == "20180811a2" & is.na(push_location) & side == "left" ~ "left",
+        cell_id == "20180811a2" & is.na(push_location) & side != "left" ~ "right",
+        cell_id == "20180815b3" & is.na(push_location) & side == "left" ~ "left", 
+        cell_id == "20180815b3" & is.na(push_location) & side != "left" ~ "right",
+        cell_id == "20180815b3" & push_location == "left" ~ "right",
+        cell_id == "20180515b3" & push_location == "right" ~ "left"
+      )
+  ) %>%
+  group_by(base_filename, episode) %>%
+  mutate(
+    norm_position_id = 
+           if_else(displacement_include == TRUE, position_id - displacement_edge, NA_real_)
+  ) %>%
+  ungroup()
+
+write_rds(tracks_summary_1, "../../data/tracks_summary.rds")
+```
